@@ -39,6 +39,7 @@ for arg in "$@"; do
     fi
 done
 
+export G1_SPACE_SIZE="1300"
 
 mkdir -p ./out
 gcc -std=c11 $CFLAGS $EXECUTABLE ./src/runtime.c ./src/gc.c -o ./out/run

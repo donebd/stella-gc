@@ -1,0 +1,18 @@
+Running ./stella-programs/logical_ops.c with flags:  -DSTELLA_RUNTIME_STATS -DSTELLA_GC_STATS
+true
+
+------------------------------------------------------------
+Garbage collector (GC) statistics:
+--------------------------------------------------------------------
+                           STATS                                   
+--------------------------------------------------------------------
+| Total memory allocation:       | 782400 bytes (32598 objects)   |
+| Total garbage collecting:      | 258 (G_0: 254, G_1: 4)    |
+| Maximum residency:             | 782400 bytes (32598 objects)   |
+| Total memory use:              | 22 reads and 0 writes   |
+| Max GC roots stack size:       | 23 roots                 |
+--------------------------------------------------------------------
+
+------------------------------------------------------------
+Stella runtime statistics:
+Total allocated fields in Stella objects: 32 604 fields

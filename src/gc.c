@@ -7,14 +7,24 @@
 
 // ============================ Memory Configuration Constants =============================
 
-#define MAX_ALLOC_SIZE (24 * 128)
+#define DEFAULT_MAX_ALLOC_SIZE (800 * 1024)
+#define DEFAULT_SPACE_SIZE_MULTIPLIER  5
 #define GEN_COUNT 2
-// #define GC_DEBUG
+#define MAX_GC_ROOTS 4096
+#define MAX_CHANGED_NODES 8192
+// #define GC_DEBUG // uncomment for debug
 
 // ========================= Global Statistics Variables ============================
 
+int MAX_ALLOC_SIZE = 0; // define in runtime
+
+// Total allocated number of bytes
 int total_allocated_bytes = 0;
+int total_requested_bytes = 0;
+
+// Total allocated number of objects
 int total_allocated_objects = 0;
+
 int max_allocated_bytes = 0;
 int max_allocated_objects = 0;
 int total_reads = 0;
@@ -22,9 +32,9 @@ int total_writes = 0;
 
 int gc_roots_max_size = 0;
 int gc_roots_top = 0;
-void **gc_roots[4096];
+void **gc_roots[MAX_GC_ROOTS];
 int changed_nodes_top = 0;
-void *changed_nodes[8192];
+void *changed_nodes[MAX_CHANGED_NODES];
 
 bool initialized = false;
 
@@ -40,34 +50,38 @@ typedef enum
   GENERATION_1
 } GenType;
 
+// Обертка над stella object
 struct gc_unit
 {
   void *moved_to;
   stella_object stella_object;
 };
 
+// Структура инкапсулирующая данные о конкретном space
 struct Space
 {
-  GenType gen;
-  int size;
-  void *next;
-  void *heap;
+  GenType gen; // принадлежность к поколению
+  int size; // размер выделенной памяти на space
+  void *next; // первый свободный байт
+  void *heap; // указатель на начало хипа
 };
 
+// Структура инкапсулирующая данные о конкретном поколении
 struct Generation
 {
-  GenType number;
-  int collected;
-  struct Space *from;
-  struct Space *to;
-  void *cursor;
+  GenType number; // номер поколения
+  int collected; // кол-во соборок мусора
+  struct Space *from; // указатель на fromSpace
+  struct Space *to; // указатель на toSpace
+  void *cursor; // переменная для реализации копирующей сборки мусора
 };
 
 // ========================= Function Declarations ============================
 
 // memory
-void init_space(struct Space *space, GenType gen, int size);
-void init_generation(struct Generation *generation, GenType gen_type, struct Space *from_space, struct Space *to_space);
+void init_space(struct Space *space, GenType gen, int size); // инициализация space
+void init_generation(struct Generation *generation, GenType gen_type, struct Space *from_space, struct Space *to_space); // инициализация поколения
+int read_env_as_int(const char *env_var_name, int default_value); // чтение нужной переменной изи env
 void init_memory();
 void *safe_malloc(size_t size);
 void handle_memory_error();
@@ -75,27 +89,27 @@ struct gc_unit *alloc_in_space(struct Space *space, size_t size_in_bytes);
 void *try_alloc(struct Generation *g, size_t size_in_bytes);
 
 // log & statistic
-void dc_log(const char *text);
+void gc_log(const char *text); // лог gc с выводом состояния памяти
 void update_allocation_stats(size_t size_in_bytes);
-void print_space(const struct Space *space);
+void print_space(const struct Space *space); // вывод состояния памяти
 
 // common
-void gc_collect();
-bool in_heap(const void *ptr, const void *heap, size_t heap_size);
+void gc_collect(); // инициация сборки мусора
+bool in_heap(const void *ptr, const void *heap, size_t heap_size); // предикат определения нахождения указателя на куче
 size_t get_stella_object_size(const stella_object *obj);
 
 // gc_unit
-size_t unit_size(const struct gc_unit *obj);
-struct gc_unit *get_gc_unit(void *st_ptr);
-stella_object *get_stella_object(struct gc_unit *gc_ptr);
+size_t unit_size(const struct gc_unit *obj); // вес объекта gc
+struct gc_unit *get_gc_unit(void *st_ptr); // получения указателя на объект gc по указателю объекта stella
+stella_object *get_stella_object(struct gc_unit *gc_ptr); // reverse get_gc_unit
 
 // space
-bool is_valid(const struct Space *space, const void *ptr);
+bool is_valid(const struct Space *space, const void *ptr); // предикат указателя в спейсе
 bool has_space(const struct Space *space, size_t requested_size);
 
 // generation
-void forward_object_fields(struct Generation *gen, stella_object *obj);
-void collect(struct Generation *g);
+void collect(struct Generation *g); // сборка в поколении
+// Функции относящиеся к сборке мусора
 void forward_roots(struct Generation *g);
 void forward_previous_generations(struct Generation *g);
 void forward_changed_nodes(struct Generation *g);
@@ -110,7 +124,7 @@ void *gc_alloc(const size_t size_in_bytes)
 {
   init_memory();
   void *result = try_alloc(&g0, size_in_bytes);
-  if (!result)
+  if (result == NULL)
   {
     gc_collect();
     result = try_alloc(&g0, size_in_bytes);
@@ -158,6 +172,7 @@ void print_gc_alloc_stats()
   printf("--------------------------------------------------------------------\n");
   printf("                           STATS                                   \n");
   printf("--------------------------------------------------------------------\n");
+  printf("| %-30s | %d bytes (%d objects)   |\n", "Total memory requested:", total_requested_bytes, total_allocated_objects);
   printf("| %-30s | %d bytes (%d objects)   |\n", "Total memory allocation:", total_allocated_bytes, total_allocated_objects);
   printf("| %-30s | %d (G_0: %d, G_1: %d)    |\n", "Total garbage collecting:", g0.collected + g1.collected, g0.collected, g1.collected);
   printf("| %-30s | %d bytes (%d objects)   |\n", "Maximum residency:", max_allocated_bytes, max_allocated_objects);
@@ -177,6 +192,7 @@ void print_state(const struct Generation *g)
     printf("To space\n");
     print_space(g->to);
   }
+  printf("Cursor: %-15p | Next: %-15p | Limit: %-15p\n", g->cursor, g->to->next, g->to->heap + g->to->size);
   printf("--------------------------------------------------------------------\n");
 }
 
@@ -184,6 +200,7 @@ void print_gc_state()
 {
   print_state(&g0);
   print_state(&g1);
+  print_gc_roots();
 }
 
 void print_gc_roots()
@@ -192,6 +209,13 @@ void print_gc_roots()
   printf("--------------------------------------------------------------------\n");
   for (int i = 0; i < gc_roots_top; i++)
   {
+    printf(
+      "\tIndex: %-5d | Address: %-15p | From: %-5s | Value: %-15p\n", 
+      i,
+      gc_roots[i],
+      is_valid(g0.from, *gc_roots[i]) ? "G_0" : is_valid(g1.from, *gc_roots[i]) ? "G_1" : "OTHER",
+      *gc_roots[i]
+    );
     printf("Address: %-15p | Value: %-15p\n", gc_roots[i], *gc_roots[i]);
   }
   printf("--------------------------------------------------------------------\n");
@@ -229,23 +253,30 @@ void init_generation(struct Generation *generation, GenType gen_type, struct Spa
   generation->to = to_space;
 }
 
-int read_g1_space_size()
+int read_env_as_int(const char *env_var_name, int default_value)
 {
-  int size = 0;
-  char *str = getenv("G1_SPACE_SIZE");
-  for (int i = 0; str[i] != '\0'; i++)
-  {
-    if (str[i] >= '0' && str[i] <= '9')
+    char *env_value = getenv(env_var_name);
+    int result = 0;
+
+    if (env_value == NULL) 
     {
-      size = size * 10 + (str[i] - '0');
+        return default_value;
     }
-    else
+
+    for (int i = 0; env_value[i] != '\0'; i++) 
     {
-      printf("Invalid input\n");
-      exit(1);
+        if (env_value[i] >= '0' && env_value[i] <= '9') 
+        {
+            result = result * 10 + (env_value[i] - '0');
+        } 
+        else 
+        {
+            printf("Invalid input in environment variable '%s': %s\n", env_var_name, env_value);
+            exit(1);
+        }
     }
-  }
-  return size;
+
+    return result;
 }
 
 void init_memory()
@@ -255,8 +286,11 @@ void init_memory()
     return;
   }
 
+  MAX_ALLOC_SIZE = read_env_as_int("MAX_ALLOC_SIZE", DEFAULT_MAX_ALLOC_SIZE);
   init_space(&g0_space_from, GENERATION_0, MAX_ALLOC_SIZE);
-  int g1_space_size = read_g1_space_size();
+  int g1_space_size = read_env_as_int("G1_SPACE_SIZE", MAX_ALLOC_SIZE * DEFAULT_SPACE_SIZE_MULTIPLIER);
+  printf("G0_SPACE_SIZE = %d\n", MAX_ALLOC_SIZE);
+  printf("G1_SPACE_SIZE = %d\n", g1_space_size);
 
   init_space(&g1_space_from, GENERATION_1, g1_space_size);
   init_space(&g1_space_to, GENERATION_1, g1_space_size);
@@ -268,6 +302,7 @@ void init_memory()
 
 void update_allocation_stats(const size_t size_in_bytes)
 {
+  total_requested_bytes += size_in_bytes;
   total_allocated_bytes += size_in_bytes + sizeof(void *);
   total_allocated_objects += 1;
   max_allocated_bytes = total_allocated_bytes;
@@ -278,7 +313,7 @@ void gc_collect()
 {
   collect(&g0);
 
-  dc_log("Collected\n");
+  gc_log("Collected\n");
 }
 
 bool in_heap(const void *ptr, const void *heap, const size_t heap_size)
@@ -344,7 +379,7 @@ void print_space(const struct Space *space)
     const int tag = STELLA_OBJECT_HEADER_TAG(gc_ptr->stella_object.object_header);
     const int field_count = STELLA_OBJECT_HEADER_FIELD_COUNT(gc_ptr->stella_object.object_header);
 
-    printf("\tGC address: %-15p | moved: %-15p", gc_ptr, gc_ptr->moved_to);
+    printf("\tGC address: %-15p | ST obj address: %-15p | moved: %-15p | tag: %-2d", gc_ptr, &gc_ptr->stella_object, gc_ptr->moved_to, tag);
     for (int i = 0; i < field_count; i++)
     {
       printf("%-15p", gc_ptr->stella_object.object_fields[i]);
@@ -355,6 +390,16 @@ void print_space(const struct Space *space)
     }
     printf("\n");
   }
+
+  // Runtime memory usage
+  printf("Boundaries  | from: %-15p | to: %-15p | total: %d bytes\n",
+         space->heap,
+         space->heap + space->size,
+         space->size);
+  printf("Free memory | from: %-15p | to: %-15p | total: %ld bytes\n",
+         space->next,
+         space->heap + space->size,
+         space->heap + space->size - space->next);
 }
 
 void *try_alloc(struct Generation *g, size_t size_in_bytes)
@@ -365,19 +410,33 @@ void *try_alloc(struct Generation *g, size_t size_in_bytes)
 
 bool chase(struct Generation *g, struct gc_unit *p)
 {
-  struct gc_unit *q = alloc_in_space(g->to, get_stella_object_size(&p->stella_object));
-  if (!q)
-    return false;
+  do {
+    struct gc_unit *q = alloc_in_space(g->to, get_stella_object_size(&p->stella_object));
+    if (q == NULL) {
+      return false;
+    }
 
-  int field_count = STELLA_OBJECT_HEADER_FIELD_COUNT(p->stella_object.object_header);
-  q->moved_to = NULL;
-  q->stella_object.object_header = p->stella_object.object_header;
+    const int field_count = STELLA_OBJECT_HEADER_FIELD_COUNT(p->stella_object.object_header);
+    void *r = NULL;
 
-  for (int i = 0; i < field_count; i++)
-  {
-    q->stella_object.object_fields[i] = p->stella_object.object_fields[i];
-  }
-  p->moved_to = q;
+    q->moved_to = NULL;
+    q->stella_object.object_header = p->stella_object.object_header;
+    for (int i = 0; i < field_count; i++) {
+      q->stella_object.object_fields[i] = p->stella_object.object_fields[i];
+
+      if (is_valid(g->from, q->stella_object.object_fields[i])) {
+        struct gc_unit *potentially_forwarded = get_gc_unit(q->stella_object.object_fields[i]);
+
+        if (!is_valid(g->to, potentially_forwarded->moved_to)) {
+          r = potentially_forwarded;
+        }
+      }
+    }
+
+    p->moved_to = q;
+    p = r;
+  } while (p != NULL);
+
   return true;
 }
 
@@ -386,17 +445,17 @@ void *forward(struct Generation *g, void *p)
   if (!is_valid(g->from, p))
     return p;
 
-  struct gc_unit *gc_object = get_gc_unit(p);
-  if (is_valid(g->to, gc_object->moved_to))
-    return get_stella_object(gc_object->moved_to);
+  struct gc_unit *gc_unit = get_gc_unit(p);
+  if (is_valid(g->to, gc_unit->moved_to))
+    return get_stella_object(gc_unit->moved_to);
 
-  if (!chase(g, gc_object) && g->to->gen != g->from->gen)
+  if (!chase(g, gc_unit) && g->to->gen != g->from->gen)
   {
     collect(generations[g->to->gen]);
-    if (!chase(g, gc_object))
+    if (!chase(g, gc_unit))
       handle_memory_error();
   }
-  return get_stella_object(gc_object->moved_to);
+  return get_stella_object(gc_unit->moved_to);
 }
 
 void collect(struct Generation *g)
@@ -410,7 +469,7 @@ void collect(struct Generation *g)
   search_objects(g);
   finalize_collection(g);
 
-  dc_log("Collected: \n");
+  gc_log("Collected: \n");
 }
 
 void forward_roots(struct Generation *g)
@@ -421,65 +480,67 @@ void forward_roots(struct Generation *g)
     *root_ptr = forward(g, *root_ptr);
   }
 
-  dc_log("All roots forwarded: \n");
+  gc_log("All roots forwarded: \n");
 }
 
+// run for all objects in prev generations and try find link to collected generation
 void forward_previous_generations(struct Generation *g)
 {
-  for (int i = 0; i < g->number; i++)
-  {
-    struct Generation *older_gen = generations[i];
-    for (void *ptr = older_gen->from->heap; ptr < older_gen->from->next; ptr += unit_size(ptr))
-    {
+  for (int i = 0; i < g->number; i++) {
+    const struct Generation* past_gen = generations[i];
+
+    for (void *ptr = past_gen->from->heap; ptr < past_gen->from->next; ptr += unit_size(ptr)) {
       struct gc_unit *obj = ptr;
-      forward_object_fields(g, ptr);
+      const int field_count = STELLA_OBJECT_HEADER_FIELD_COUNT(obj->stella_object.object_header);
+      for (int j = 0; j < field_count; j++) {
+        obj->stella_object.object_fields[j] = forward(g, obj->stella_object.object_fields[j]);
+      }
     }
   }
-  dc_log("Previous generations forwarded: \n");
+  gc_log("Previous generations forwarded: \n");
 }
 
 void forward_changed_nodes(struct Generation *g)
 {
-  for (int i = 0; i < changed_nodes_top; i++)
-  {
+  for (int i = 0; i < changed_nodes_top; i++) {
     stella_object *obj = changed_nodes[i];
-    forward_object_fields(g, obj);
-  }
-  changed_nodes_top = 0;
+    const int field_count = STELLA_OBJECT_HEADER_FIELD_COUNT(obj->object_header);
+    for (int j = 0; j < field_count; j++) {
+      obj->object_fields[j] = forward(g, obj->object_fields[j]);
+    }
 
-  dc_log("Changed nodes forwarded: \n");
+    changed_nodes_top = 0;
+  }
+
+  gc_log("Changed nodes forwarded: \n");
 }
 
 void search_objects(struct Generation *g)
 {
-  while (g->cursor < g->to->next)
-  {
+  while (g->cursor < g->to->next) {
     struct gc_unit *obj = g->cursor;
-    forward_object_fields(g, g->cursor);
+    const int field_count = STELLA_OBJECT_HEADER_FIELD_COUNT(obj->stella_object.object_header);
+    for (int i = 0; i < field_count; i++) {
+      obj->stella_object.object_fields[i] = forward(g, obj->stella_object.object_fields[i]);
+    }
+
     g->cursor += unit_size(obj);
   }
 
-  dc_log("Searching \n");
+  gc_log("Searching \n");
 }
 
-void forward_object_fields(struct Generation *gen, stella_object *obj)
+void swap_spaces(struct Generation *g)
 {
-  int field_count = STELLA_OBJECT_HEADER_FIELD_COUNT(obj->object_header);
-  for (int i = 0; i < field_count; i++)
-  {
-    obj->object_fields[i] = forward(gen, obj->object_fields[i]);
-  }
-}
+  void *buff = g->from;
+  g->from = g->to;
+  g->to = buff;
 
-void swap_spaces(struct Generation *gen)
-{
-  struct Space *temp = gen->from;
-  gen->from = gen->to;
-  gen->to = temp;
-  gen->to->next = gen->to->heap;
+  g->to->next = g->to->heap;
 
-  generations[gen->from->gen - 1]->to = gen->from;
-  generations[gen->from->gen - 1]->cursor = gen->from->heap;
+  struct Generation* past = generations[g->from->gen - 1];
+  past->to = g->from;
+  past->cursor = g->from->heap;
 }
 
 void reset_next_gen(struct Generation *gen)
@@ -491,7 +552,7 @@ void reset_next_gen(struct Generation *gen)
 }
 
 void finalize_collection(struct Generation *g)
-{
+{ 
   if (g->from->gen == g->to->gen)
   {
     swap_spaces(g);
@@ -501,7 +562,7 @@ void finalize_collection(struct Generation *g)
   reset_next_gen(g);
 }
 
-void dc_log(const char *text)
+void gc_log(const char *text)
 {
 #ifdef GC_DEBUG
   printf("--------------------------------------------------------------------\n");

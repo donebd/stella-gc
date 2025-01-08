@@ -38,3 +38,7 @@
 ## Примеры работы
 
 Примеры работы сборщика мусора на нескольких программ, находящихся в папке `./stella-programms`, находятся в папке `./output-results`.
+
+### print_gc_state()
+
+![img.png](img/print_gc_state.jpg)

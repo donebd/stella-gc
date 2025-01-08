@@ -39,10 +39,12 @@ for arg in "$@"; do
     fi
 done
 
-export G1_SPACE_SIZE="1300"
+export MAX_ALLOC_SIZE="10240"
+export G1_SPACE_SIZE="1024000"
 
 mkdir -p ./out
 gcc -std=c11 $CFLAGS $EXECUTABLE ./src/runtime.c ./src/gc.c -o ./out/run
 chmod a+x ./out/run
 echo "Running $EXECUTABLE with flags: $CFLAGS"
 echo "" | ./out/run
+rm ./out/run
